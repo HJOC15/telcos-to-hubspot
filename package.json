@@ -1,0 +1,25 @@
+{
+  "name": "telcos-to-hubspot-cron",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Claro + (opcional Tigo) -> HubSpot custom object, con cron diario 8:00",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "schedule": "node src/jobs/scheduler.js",
+    "fix:phones": "node scripts/normalize_phone_plus.js",
+    "dev": "node src/test-original.js",
+    "sync:mensajes": "node src/run-messages.js",
+    "tigo:b2b": "node src/run-tigo-b2b.js",
+    "serve": "node src/server.js",
+    "assoc": "node src/run-assoc.js",
+    "tigo:mensajes": "node src/run-tigo-messages.js"
+  },
+  "dependencies": {
+    "axios": "^1.7.2",
+    "dotenv": "^16.4.5",
+    "express": "^5.1.0",
+    "im-csms-sdk-javascript-v4": "github:ubiquolabs/im-contactosms-sdk-js",
+    "node-cron": "^3.0.3"
+  }
+}

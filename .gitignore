@@ -1,0 +1,46 @@
+# --- Node ---
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+# Si usan lockfile, NO lo ignores (deja package-lock.json / yarn.lock / pnpm-lock.yaml)
+
+# --- Entornos / credenciales ---
+.env
+.env.*
+!.env.example
+
+# --- Logs y tmp ---
+logs/
+*.log
+*.tmp
+*.cache
+.eslintcache
+.parcel-cache
+.nyc_output/
+coverage/
+
+# --- Build/outputs ---
+dist/
+build/
+.tmp/
+.out/
+.next/
+.vercel/
+.netlify/
+storybook-static/
+.svelte-kit/
+*.tsbuildinfo
+
+# --- Sistema / IDE ---
+.DS_Store
+**/.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.iml
+
+# --- Data local del app (payloads DRY-RUN) ---
+data/*
+!data/.gitkeep
