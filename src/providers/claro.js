@@ -33,7 +33,6 @@ function getBase() {
   return raw.replace(/\/+$/, "");
 }
 
-
 const PKG_CANDIDATES = ["im-contactosms-sdk-js","im-csms-sdk-javascript-v4"];
 
 function pathToFileUrl(p) {
@@ -75,7 +74,6 @@ async function trySdkMessages({ start, end, limit }) {
   const baseUrl   = process.env.CLARO_BASE_URL || process.env.URL;
   if (!apiKey || !apiSecret || !baseUrl) throw new Error("Faltan CLARO_API_KEY/CLARO_API_SECRET/CLARO_BASE_URL");
 
-  
   const startISO = toISO(start);
   const endISO   = toISO(end);
   const startRFC = rfc1123(start, false);
@@ -182,4 +180,55 @@ export async function claroListMessages({ limit = 500, days } = {}) {
   // 2) Si el SDK devuelve 500 (u otro), probamos manual firmado sin duplicados
   const manual = await tryManualMessages({ start, end, limit });
   return manual;
+}
+
+/* ==================================================
+   CONTACTOS (derivados de mensajes) para CLARO
+   - Genera una lista de "contactos" a partir de los msisdn
+   - Útil para alimentar src/jobs/sync.js (upsert a HubSpot)
+   ================================================== */
+export async function claroListContacts({ limit = 1000, days } = {}) {
+  const d = Number(days ?? process.env.CLARO_CONTACTS_DAYS ?? process.env.CLARO_MESSAGES_DAYS ?? 30);
+
+  // Pedimos más mensajes para dedupe cómodo
+  const msgs = await claroListMessages({ limit: Math.max(limit, 2000), days: d });
+
+  const onlyDigits = (s) => String(s || "").replace(/\D/g, "");
+
+  function getNumber(m) {
+    return (
+      onlyDigits(m?.msisdn) ||
+      onlyDigits(m?.msisdnTo) ||
+      onlyDigits(m?.msisdn_from) ||
+      onlyDigits(m?.phone) ||
+      onlyDigits(m?.phoneNumber) ||
+      onlyDigits(m?.to) ||
+      ""
+    );
+  }
+
+  const seen = new Set();
+  const out = [];
+
+  for (const m of Array.isArray(msgs) ? msgs : []) {
+    const num = getNumber(m);
+    if (!num) continue;
+    if (seen.has(num)) continue;
+    seen.add(num);
+
+    out.push({
+      msisdn: num,
+      // Si tu payload de Claro incluye estos, los puedes mapear:
+      // email: m.email || undefined,
+      // name: m.name || m.fullName || undefined,
+    });
+
+    if (out.length >= limit) break;
+  }
+
+  if (DEBUG) {
+    console.log(`[CLARO][CONTACTS] generados=${out.length} únicos a partir de mensajes (days=${d}, limit=${limit})`);
+  }
+
+  return out;
 }

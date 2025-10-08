@@ -14,7 +14,11 @@
     "serve": "node src/server.js",
     "assoc": "node src/run-assoc.js",
     "tigo:mensajes": "node src/run-tigo-messages.js",
-    "tigo:contactos": "node src/run-tigo-contacts.js"
+    "tigo:contactos": "node src/run-tigo-contacts.js",
+    "assoc:tigo": "node src/run-assoc-tigo.js",
+    "check:assoc": "node src/tools/check-assoc.js",
+    "diag:phones": "node src/tools/diagnose-phone-matching.js",
+    "list:schemas": "node src/tools/list-schemas.js"
   },
   "dependencies": {
     "axios": "^1.7.2",

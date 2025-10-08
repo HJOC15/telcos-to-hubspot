@@ -2,117 +2,86 @@
 import "dotenv/config";
 import express from "express";
 import cron from "node-cron";
+import { associateTigoMessagesToContacts } from "./jobs/associate_tigo_messages_contacts.js";
+
+// === Runners ===
+// CLARO (tu job existente de contactos)
+import { runSync as runClaroSync } from "./jobs/sync.js";
+
+// TIGO (ya los tienes listos)
+import { runTigoMessagesSync } from "./jobs/sync_tigo_messages.js";
+import { runTigoContactsSync } from "./jobs/sync_tigo_contacts.js";
 
 const app = express();
 app.use(express.json());
 
 const PORT = Number(process.env.PORT || 3000);
-const CRON_ENABLE = String(process.env.CRON_ENABLE || "true").toLowerCase() === "true";
-const CRON_EXPRESSION = process.env.CRON_EXPRESSION || "0 8 * * *";
-const TIMEZONE = process.env.TIMEZONE || "America/Guatemala";
+const TIMEZONE = process.env.TIMEZONE || process.env.TZ || "America/Guatemala";
 
-// ---- Helpers para cargar tus jobs sin pelear con nombres de archivos ----
-async function getMessagesRunner() {
-  // tu repo ya tiene: src/jobs/sync_messages.js -> runMessagesSync
-  const mod = await import("./jobs/sync_messages.js");
-  if (typeof mod.runMessagesSync !== "function") {
-    throw new Error("No encontré runMessagesSync en ./jobs/sync_messages.js");
-  }
-  return mod.runMessagesSync;
-}
+// ===== Healthcheck =====
+app.get("/health", (_req, res) => res.json({ ok: true, tz: TIMEZONE }));
 
-async function getContactsRunner() {
-  // algunos repos lo tienen en sync_contacts.js; otros en sync.js
+// ===== Endpoints manuales (por si quieres disparar desde Postman) =====
+app.get("/cron/claro/run", async (_req, res) => {
   try {
-    const mod = await import("./jobs/sync_contacts.js");
-    if (typeof mod.runContactsSync === "function") return mod.runContactsSync;
-  } catch {}
-  const fallback = await import("./jobs/sync.js");
-  if (typeof fallback.runContactsSync === "function") return fallback.runContactsSync;
-  if (typeof fallback.runSync === "function") return fallback.runSync; // por si se llama así
-  throw new Error("No encontré el runner de contactos (runContactsSync/runSync).");
-}
-
-// ---- Pequeño lock para evitar solapes de ejecuciones ----
-const running = new Map(); // key: "claro:contacts" | "claro:messages" -> boolean
-
-async function guardedRun(key, fn) {
-  if (running.get(key)) {
-    return { ok: false, message: `La tarea ${key} ya está corriendo` };
-  }
-  running.set(key, true);
-  const startedAt = new Date().toISOString();
-  try {
-    await fn();
-    return { ok: true, startedAt, finishedAt: new Date().toISOString() };
-  } catch (err) {
-    return { ok: false, startedAt, error: err?.response?.data ?? err?.message ?? String(err) };
-  } finally {
-    running.set(key, false);
-  }
-}
-
-// ---- Rutas HTTP ----
-app.get("/health", (_req, res) => {
-  res.json({
-    status: "ok",
-    timezone: TIMEZONE,
-    cron: { enabled: CRON_ENABLE, expression: CRON_EXPRESSION },
-    running: Array.from(running.entries()),
-    now: new Date().toISOString(),
-  });
-});
-
-// Disparo manual: CONTACTOS de Claro -> HubSpot
-app.post("/run/claro/contacts", async (_req, res) => {
-  try {
-    const runner = await getContactsRunner();
-    const result = await guardedRun("claro:contacts", runner);
-    res.status(result.ok ? 200 : 409).json({ task: "claro:contacts", ...result });
+    console.log(`[CRON][Claro][manual] inicio ${new Date().toISOString()}`);
+    await runClaroSync();
+    res.send("OK (Claro)");
   } catch (e) {
-    res.status(500).json({ task: "claro:contacts", ok: false, error: e?.message ?? String(e) });
+    console.error("[CRON][Claro][manual] error:", e?.response?.data ?? e.message ?? e);
+    res.status(500).send("Error");
   }
 });
 
-// Disparo manual: MENSAJES de Claro -> HubSpot
-app.post("/run/claro/mensajes", async (_req, res) => {
+app.get("/cron/tigo/run", async (_req, res) => {
   try {
-    const runner = await getMessagesRunner();
-    const result = await guardedRun("claro:messages", runner);
-    res.status(result.ok ? 200 : 409).json({ task: "claro:messages", ...result });
+    console.log(`[CRON][Tigo][manual] inicio ${new Date().toISOString()}`);
+    await runTigoMessagesSync();
+    await runTigoContactsSync();
+    await associateTigoMessagesToContacts();
+    res.send("OK (Tigo)");
   } catch (e) {
-    res.status(500).json({ task: "claro:messages", ok: false, error: e?.message ?? String(e) });
+    console.error("[CRON][Tigo][manual] error:", e?.response?.data ?? e.message ?? e);
+    res.status(500).send("Error");
   }
 });
 
-// ---- Cron programado a las 8:00 AM GT ----
-if (CRON_ENABLE) {
-  try {
-    // CONTACTOS
-    cron.schedule(
-      CRON_EXPRESSION,
-      async () => {
-        const runner = await getContactsRunner();
-        await guardedRun("claro:contacts", runner);
-      },
-      { timezone: TIMEZONE }
-    );
-    // MENSAJES
-    cron.schedule(
-      CRON_EXPRESSION,
-      async () => {
-        const runner = await getMessagesRunner();
-        await guardedRun("claro:messages", runner);
-      },
-      { timezone: TIMEZONE }
-    );
-    console.log(`[CRON] Programado "${CRON_EXPRESSION}" TZ=${TIMEZONE} (contacts & mensajes)`);
-  } catch (e) {
-    console.error("[CRON] Error al programar tareas:", e?.message ?? e);
-  }
-}
+// ===== Cron jobs programados =====
 
-// ---- Start server ----
+// Claro a las 08:00 GT
+cron.schedule(
+  "0 8 * * *",
+  async () => {
+    console.log(`[CRON][Claro] inicio ${new Date().toISOString()}`);
+    try {
+      await runClaroSync();
+      console.log("[CRON][Claro] fin OK");
+    } catch (e) {
+      console.error("[CRON][Claro] error:", e?.response?.data ?? e.message ?? e);
+    }
+  },
+  { timezone: TIMEZONE }
+);
+console.log(`[CRON] Programado Claro a las 08:00 ${TIMEZONE}`);
+
+// Tigo (mensajes + contactos) a las 09:00 GT
+cron.schedule(
+  "0 9 * * *",
+  async () => {
+    console.log(`[CRON][Tigo] inicio ${new Date().toISOString()}`);
+    try {
+      await runTigoMessagesSync();     // mensajes
+      await runTigoContactsSync();     // contactos
+      console.log("[CRON][Tigo] fin OK");
+    } catch (e) {
+      console.error("[CRON][Tigo] error:", e?.response?.data ?? e.message ?? e);
+    }
+  },
+  { timezone: TIMEZONE }
+);
+console.log(`[CRON] Programado Tigo (mensajes+contactos) a las 09:00 ${TIMEZONE}`);
+
+// ===== Start server =====
 app.listen(PORT, () => {
   console.log(`HTTP server listening on :${PORT}`);
   console.log(`Healthcheck: http://localhost:${PORT}/health`);
