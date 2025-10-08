@@ -6,28 +6,20 @@ function normalizeEnvKey(name) {
   return String(name || "").toUpperCase().replace(/[^A-Z0-9]/g, "_");
 }
 
-/** Lee override de tipo: HUBSPOT_<NOMBRE>_OBJECT_TYPEID  (ej: HUBSPOT_P_MENSAJES_OBJECT_TYPEID=2-1234567) */
 function readOverrideFor(nameOrId) {
   const key = `HUBSPOT_${normalizeEnvKey(nameOrId)}_OBJECT_TYPEID`;
   return process.env[key] || "";
 }
 
-/** Resuelve objectTypeId para un nombre o devuelve el mismo si ya es id */
 export async function resolveObjectTypeId(objectNameOrId) {
-  // 1) si ya viene como 2-XXXXX
   if (/^\d+-\d+$/.test(objectNameOrId)) return objectNameOrId;
 
-  // 2) override por ENV
   const ov = readOverrideFor(objectNameOrId);
   if (ov) return ov;
 
-  // 3) contactos (varios alias) → 0-1
   const nameLc = String(objectNameOrId).trim().toLowerCase();
-  if (nameLc === "contacts" || nameLc === "contact" || nameLc === "contactos" || nameLc === "0-1") {
-    return "0-1";
-  }
+  if (["contacts","contact","contactos","0-1"].includes(nameLc)) return "0-1";
 
-  // 4) buscar en /crm/v3/schemas
   const url = "https://api.hubapi.com/crm/v3/schemas";
   const { data } = await axios.get(url, { headers: { Authorization: `Bearer ${TOKEN}` } });
   const list = Array.isArray(data?.results) ? data.results : [];
@@ -39,8 +31,7 @@ export async function resolveObjectTypeId(objectNameOrId) {
   );
   if (!hit?.objectTypeId) {
     throw new Error(`[ASSOC] No se pudo resolver objectTypeId para "${objectNameOrId}". ` +
-      `Opciones: poner HUBSPOT_${normalizeEnvKey(objectNameOrId)}_OBJECT_TYPEID=2-XXXXX en .env, ` +
-      `o revisa Settings → Data Model para copiar su ID.`);
+      `Pon HUBSPOT_${normalizeEnvKey(objectNameOrId)}_OBJECT_TYPEID=2-XXXXX en .env o revisa Settings → Data Model.`);
   }
   return hit.objectTypeId;
 }
@@ -51,19 +42,13 @@ async function fetchLabelsRaw(fromId, toId) {
   return Array.isArray(data?.results) ? data.results : [];
 }
 
-/** Normaliza estructura de label (soporta associationTypeId | typeId | id) */
 function normalizeLabels(rawList = []) {
   return rawList.map(l => {
-    const associationTypeId =
-      l?.associationTypeId ??
-      l?.typeId ??
-      l?.id ?? // algunos portales devuelven 'id'
-      null;
-
+    const associationTypeId = l?.associationTypeId ?? l?.typeId ?? l?.id ?? null;
     return {
       associationTypeId,
-      label: l?.label || l?.name || "",
-      name: l?.name || l?.label || "",
+      label: (l?.label || l?.name || "").trim(),
+      name: (l?.name || l?.label || "").trim(),
       raw: l
     };
   }).filter(x => x.associationTypeId != null);
@@ -77,41 +62,37 @@ export async function getAssociationTypeIdEitherDirection(fromObject, toObject) 
   const toId   = await resolveObjectTypeId(toObject);
 
   // A -> B
-  let rawA = await fetchLabelsRaw(fromId, toId);
-  let A = normalizeLabels(rawA);
-
+  let A = normalizeLabels(await fetchLabelsRaw(fromId, toId));
   if (A.length) {
-    let chosen = A[0];
-    if (prefer) {
-      const hit = A.find(l => l.label.trim().toLowerCase() === prefer || l.name.trim().toLowerCase() === prefer);
-      if (hit) chosen = hit;
-    }
+    let chosen = pickLabel(A, prefer);
     console.log(`[ASSOC][A->B] labels: ${A.map(l => `${l.associationTypeId}:${l.label||l.name}`).join(", ")}`);
     console.log(`[ASSOC][A->B] elegido: ${chosen.associationTypeId}:${chosen.label || chosen.name}`);
     return { associationTypeId: chosen.associationTypeId, fromId, toId, reversed: false };
   }
 
   // B -> A (reversa)
-  let rawB = await fetchLabelsRaw(toId, fromId);
-  let B = normalizeLabels(rawB);
-
+  let B = normalizeLabels(await fetchLabelsRaw(toId, fromId));
   if (!B.length) {
-    console.log("[ASSOC] Respuesta cruda sin normalizar (A->B):", JSON.stringify(rawA, null, 2));
-    console.log("[ASSOC] Respuesta cruda sin normalizar (B->A):", JSON.stringify(rawB, null, 2));
-    throw new Error(`[ASSOC] No hay labels ni en ${fromId}->${toId} ni en ${toId}->${fromId}. Crea al menos un label en el portal.`);
+    throw new Error(`[ASSOC] No hay labels ni en ${fromId}->${toId} ni en ${toId}->${fromId}. Crea un Association Label.`);
   }
-
-  let chosen = B[0];
-  if (prefer) {
-    const hit = B.find(l => l.label.trim().toLowerCase() === prefer || l.name.trim().toLowerCase() === prefer);
-    if (hit) chosen = hit;
-  }
+  let chosen = pickLabel(B, prefer);
   console.log(`[ASSOC][B->A] labels: ${B.map(l => `${l.associationTypeId}:${l.label||l.name}`).join(", ")}`);
   console.log(`[ASSOC][B->A] elegido: ${chosen.associationTypeId}:${chosen.label || chosen.name}`);
   return { associationTypeId: chosen.associationTypeId, fromId: toId, toId: fromId, reversed: true };
 }
 
-/** Crea asociaciones respetando la dirección indicada */
+function pickLabel(list, preferLc) {
+  // 1) si hay preferencia .env, intenta por label o name
+  if (preferLc) {
+    const hit = list.find(l => l.label.toLowerCase() === preferLc || l.name.toLowerCase() === preferLc);
+    if (hit) return hit;
+  }
+  // 2) evita labels vacíos si es posible
+  const nonEmpty = list.find(l => l.label || l.name);
+  return nonEmpty || list[0];
+}
+
+/** Crea asociaciones y devuelve conteo real */
 export async function batchAssociateDirected({ fromId, toId, associationTypeId, pairs }) {
   const url = `https://api.hubspot.com/crm/v4/associations/${encodeURIComponent(fromId)}/${encodeURIComponent(toId)}/batch/create`;
   const headers = { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" };
@@ -124,5 +105,14 @@ export async function batchAssociateDirected({ fromId, toId, associationTypeId, 
   }));
 
   const { data } = await axios.post(url, { inputs }, { headers });
-  return data;
+  // La API puede no devolver “counts” directos; intentamos inferir
+  const ok = Array.isArray(data?.results) ? data.results.length : inputs.length;
+  const errs = Array.isArray(data?.errors) ? data.errors.length : 0;
+
+  if (errs) {
+    console.warn(`[ASSOC][WARN] errores en batch: ${errs} (ok=${ok})`);
+    // dump corto de los primeros errores
+    console.warn(JSON.stringify((data?.errors || []).slice(0, 3), null, 2));
+  }
+  return { created: ok, errors: errs, raw: data };
 }

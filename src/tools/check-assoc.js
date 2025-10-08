@@ -1,47 +1,52 @@
-// src/tools/check-assoc.js
+// src/tools/check-assoc-fast.js
 import "dotenv/config";
 import axios from "axios";
 import fs from "fs";
 import path from "path";
+import { resolveObjectTypeId } from "../sinks/hubspotAssoc.js";
 
 const TOKEN = process.env.HUBSPOT_TOKEN;
 const MSG_OBJECT = (process.env.HUBSPOT_MESSAGES_OBJECT || "p_mensajes").trim();
-const CONTACTS_OBJECT = "contacts";
+const CONTACTS_OBJECT = (process.env.HUBSPOT_CONTACTS_OBJECT || "contacts").trim();
 
-const PAGE_LIMIT_MESSAGES = Number(process.env.CHECK_LIMIT || 500);
+// Límite de mensajes a revisar (rápido). Sube si quieres.
+const LIMIT = Number(process.env.CHECK_LIMIT || 1000);
+
+// Si quieres contar solo asociaciones con un label específico (ej. 20: "Contactos"):
+// exporta env: CHECK_LABEL_ID=20
+const FILTER_LABEL_ID = process.env.CHECK_LABEL_ID ? Number(process.env.CHECK_LABEL_ID) : null;
+
+const BATCH = 100;
+const RATE_DELAYMS = Number(process.env.SYNC_RATE_DELAY_MS || 150);
 const SHOW_SAMPLE = 20;
 const OUT_DIR = "reports";
-const ONLY_ASSOC = String(process.env.CHECK_ONLY_ASSOC || "0") === "1";
 
 async function getPortalId() {
-  const url = "https://api.hubspot.com/account-info/v3/details";
-  const { data } = await axios.get(url, { headers: { Authorization: `Bearer ${TOKEN}` } });
-  return String(data?.portalId || data?.portal_id || "");
+  try {
+    const url = "https://api.hubapi.com/account-info/v3/details";
+    const { data } = await axios.get(url, { headers: { Authorization: `Bearer ${TOKEN}` } });
+    return String(data?.portalId || data?.portal_id || "");
+  } catch {
+    return "";
+  }
 }
-async function getObjectTypeId(objectName) {
-  if (/^\d+-\d+$/.test(objectName)) return objectName;
-  const url = "https://api.hubapi.com/crm/v3/schemas";
-  const { data } = await axios.get(url, { headers: { Authorization: `Bearer ${TOKEN}` } });
-  const list = Array.isArray(data?.results) ? data.results : [];
-  const hit = list.find(s =>
-    s?.name === objectName ||
-    s?.fullyQualifiedName === objectName ||
-    s?.labels?.singular === objectName ||
-    s?.labels?.plural === objectName
-  );
-  return hit?.objectTypeId || objectName;
-}
+
 function recordUrl({ portalId, objectTypeId, recordId }) {
   if (!portalId || !objectTypeId || !recordId) return "";
-  return `https://app.hubspot.com/contacts/${portalId}/record/${objectTypeId}/${recordId}`;
+  return `https://app.hubspot.com/contacts/${portalId}/record/${encodeURIComponent(objectTypeId)}/${recordId}`;
 }
 
 async function listMessagesPage({ after }) {
   const url = `https://api.hubapi.com/crm/v3/objects/${encodeURIComponent(MSG_OBJECT)}`;
-  const params = { limit: 100, properties: "id_mensaje_unico,numero,compania,hs_createdate", after };
+  const params = {
+    limit: 100,
+    properties: "id_mensaje_unico,numero,compania,hs_createdate",
+    after
+  };
   const { data } = await axios.get(url, { headers: { Authorization: `Bearer ${TOKEN}` }, params });
   return data;
 }
+
 async function fetchMessages(limitTotal) {
   const all = [];
   let after;
@@ -50,75 +55,105 @@ async function fetchMessages(limitTotal) {
     const results = Array.isArray(page?.results) ? page.results : [];
     all.push(...results);
     after = page?.paging?.next?.after;
+    console.log(`[LOAD] mensajes acumulados=${all.length}`);
     if (!after) break;
   }
   return all.slice(0, limitTotal);
 }
-async function batchReadAssociations(fromIds) {
+
+async function batchReadAssociationsV4(fromTypeId, toTypeId, fromIds) {
   if (!fromIds.length) return [];
-  const url = `https://api.hubapi.com/crm/v4/associations/${encodeURIComponent(MSG_OBJECT)}/${CONTACTS_OBJECT}/batch/read`;
+  const url = `https://api.hubapi.com/crm/v4/associations/${encodeURIComponent(fromTypeId)}/${encodeURIComponent(toTypeId)}/batch/read`;
   const inputs = fromIds.map(id => ({ id: String(id) }));
-  const { data } = await axios.post(url, { inputs }, {
-    headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" }
-  });
-  return data?.results || [];
+  const { data } = await axios.post(
+    url,
+    { inputs },
+    { headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" } }
+  );
+  // Devuelve results: [{ fromId, to: [{ toObjectId, types: [{associationTypeId,...}] }] }]
+  return Array.isArray(data?.results) ? data.results : [];
 }
+
 async function batchReadContacts(contactIds) {
   if (!contactIds.length) return new Map();
-  const url = `https://api.hubapi.com/crm/v3/objects/${CONTACTS_OBJECT}/batch/read`;
+  const url = `https://api.hubapi.com/crm/v3/objects/contacts/batch/read`;
   const inputs = contactIds.map(id => ({ id: String(id) }));
-  const { data } = await axios.post(url, {
-    inputs,
-    properties: ["firstname","lastname","email","numero_telefono_id_unico","compania"]
-  }, {
-    headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" }
-  });
+  const { data } = await axios.post(
+    url,
+    {
+      inputs,
+      properties: ["firstname","lastname","email","numero_telefono_id_unico","compania"]
+    },
+    { headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" } }
+  );
   const map = new Map();
   for (const r of (data?.results || [])) map.set(String(r.id), r.properties || {});
   return map;
 }
 
-async function main() {
-  console.log("== Check asociaciones p_mensajes → contacts ==");
-  const portalId = await getPortalId();
-  const msgObjectTypeId = await getObjectTypeId(MSG_OBJECT);
+function filterToByLabel(toArr) {
+  if (!FILTER_LABEL_ID) return toArr;
+  return toArr.filter(t => {
+    const types = Array.isArray(t?.types) ? t.types : [];
+    return types.some(tt => Number(tt?.associationTypeId) === FILTER_LABEL_ID);
+  });
+}
 
-  const messages = await fetchMessages(PAGE_LIMIT_MESSAGES);
-  console.log(`[MSG] leídos=${messages.length} (mostrando hasta ${PAGE_LIMIT_MESSAGES})`);
+async function main() {
+  console.log("== Check asociaciones (FAST) p_mensajes → contacts ==");
+  const portalId = await getPortalId();
+
+  const msgTypeId = await resolveObjectTypeId(MSG_OBJECT);
+  const ctcTypeId = await resolveObjectTypeId(CONTACTS_OBJECT);
+
+  const messages = await fetchMessages(LIMIT);
+  console.log(`[MSG] leídos=${messages.length} (límite ${LIMIT})`);
 
   const msgIds = messages.map(m => String(m.id));
-  const assocRows = [];
-  for (let i = 0; i < msgIds.length; i += 100) {
-    const slice = msgIds.slice(i, i + 100);
-    const rows = await batchReadAssociations(slice);
-    assocRows.push(...rows);
+  const assocByMsg = new Map(); // msgId -> array de to (filtrados por label si aplica)
+
+  for (let i = 0; i < msgIds.length; i += BATCH) {
+    const slice = msgIds.slice(i, i + BATCH);
+    const res = await batchReadAssociationsV4(msgTypeId, ctcTypeId, slice);
+    for (const row of res) {
+      const toList = Array.isArray(row?.to) ? filterToByLabel(row.to) : [];
+      assocByMsg.set(String(row.fromId), toList);
+    }
+    console.log(`[ASSOC READ] ${Math.min(i + BATCH, msgIds.length)}/${msgIds.length}`);
+    if (RATE_DELAYMS > 0) await new Promise(r => setTimeout(r, RATE_DELAYMS));
   }
 
-  const msgIdToContactIds = new Map();
-  for (const row of assocRows) {
-    const toList = Array.isArray(row?.to) ? row.to : [];
-    msgIdToContactIds.set(String(row.fromId), toList.map(t => String(t.toObjectId)));
-  }
+  // recolectar contactos únicos
+  const allContactIds = Array.from(
+    new Set([].concat(...Array.from(assocByMsg.values()).map(arr => arr.map(t => String(t.toObjectId)))))
+  );
 
-  const allContactIds = Array.from(new Set([].concat(...Array.from(msgIdToContactIds.values()))));
   const contactMap = await batchReadContacts(allContactIds);
 
+  // armar rows
   const rows = messages.map(m => {
     const props = m.properties || {};
-    const mids = msgIdToContactIds.get(String(m.id)) || [];
-    const msgLink = recordUrl({ portalId, objectTypeId: msgObjectTypeId, recordId: m.id });
-    const contactsPretty = mids.map(cid => {
+    const msgId = String(m.id);
+    const toList = assocByMsg.get(msgId) || [];
+    const link = recordUrl({ portalId, objectTypeId: msgTypeId, recordId: msgId });
+
+    const contactsPretty = toList.map(t => {
+      const cid = String(t.toObjectId);
       const p = contactMap.get(cid) || {};
       const name = [p.firstname, p.lastname].filter(Boolean).join(" ").trim();
-      return `${cid} | ${p.numero_telefono_id_unico || ""} | ${name || "(sin nombre)"} | ${p.email || ""}`;
+      // Si hay types con label, muéstralo
+      const typeStr = Array.isArray(t.types) && t.types.length
+        ? t.types.map(tt => `${tt.associationTypeId}`).join("|")
+        : "";
+      return `${cid} | ${p.numero_telefono_id_unico || ""} | ${name || "(sin nombre)"} | ${p.email || ""} | types=${typeStr}`;
     });
+
     return {
-      msg_id: m.id,
+      msg_id: msgId,
       msg_numero: props.numero || "",
       msg_compania: props.compania || "",
-      msg_created: props.hs_createdate || "",
-      msg_link: msgLink,
-      contacts_count: mids.length,
+      msg_link: link,
+      contacts_count: toList.length,
       contacts_info: contactsPretty.join(" || ")
     };
   });
@@ -126,32 +161,21 @@ async function main() {
   const sin = rows.filter(r => r.contacts_count === 0);
   const con = rows.filter(r => r.contacts_count > 0);
 
-  if (ONLY_ASSOC) {
-    console.log(`\n[SOLO ASOCIADOS] count=${con.length}`);
+  console.log(`\n[RESUMEN] sin_asociación=${sin.length} con_asociación=${con.length}`);
+  if (con.length) {
+    console.log(`\n--- Mensajes CON asociaciones (sample ${Math.min(SHOW_SAMPLE, con.length)}) ---`);
     con.slice(0, SHOW_SAMPLE).forEach(r => {
       console.log(`[MSG ${r.msg_id}] numero=${r.msg_numero} link=${r.msg_link}`);
       console.log(`   → contacts(${r.contacts_count}): ${r.contacts_info}`);
     });
   } else {
-    console.log(`\n[RESUMEN] sin_asociación=${sin.length} con_asociación=${con.length}`);
-    if (sin.length) {
-      console.log(`\n--- Mensajes SIN asociaciones (sample ${Math.min(SHOW_SAMPLE, sin.length)}) ---`);
-      sin.slice(0, SHOW_SAMPLE).forEach(r => {
-        console.log(`[MSG ${r.msg_id}] numero=${r.msg_numero} compania=${r.msg_compania} link=${r.msg_link}`);
-      });
-    }
-    if (con.length) {
-      console.log(`\n--- Mensajes CON asociaciones (sample ${Math.min(SHOW_SAMPLE, con.length)}) ---`);
-      con.slice(0, SHOW_SAMPLE).forEach(r => {
-        console.log(`[MSG ${r.msg_id}] numero=${r.msg_numero} link=${r.msg_link}`);
-        console.log(`   → contacts(${r.contacts_count}): ${r.contacts_info}`);
-      });
-    }
+    console.log(`\n(No se encontraron asociaciones en el rango muestreado. Prueba sin filtro de label o ajusta CHECK_LIMIT.)`);
   }
 
+  // CSV
   fs.mkdirSync(OUT_DIR, { recursive: true });
-  const outPath = path.join(OUT_DIR, `assoc_audit_${Date.now()}.csv`);
-  const headers = ["msg_id","msg_numero","msg_compania","msg_created","msg_link","contacts_count","contacts_info"];
+  const outPath = path.join(OUT_DIR, `assoc_fast_${Date.now()}.csv`);
+  const headers = ["msg_id","msg_numero","msg_compania","msg_link","contacts_count","contacts_info"];
   const csv = [
     headers.join(","),
     ...rows.map(r => headers.map(h => {
@@ -164,5 +188,5 @@ async function main() {
 }
 
 main().catch(e => {
-  console.error("Check error:", e?.response?.data ?? e.message ?? e);
+  console.error("Check FAST error:", e?.response?.data ?? e.message ?? e);
 });

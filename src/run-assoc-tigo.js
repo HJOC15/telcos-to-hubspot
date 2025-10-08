@@ -1,4 +1,4 @@
 // src/run-assoc-tigo.js
 import "dotenv/config"; 
-import { associateTigoMessagesToContacts } from "./jobs/associate_tigo_messages_contacts.js";
-associateTigoMessagesToContacts();
+import { associateTigoMessagesToContactsForce20 } from "./jobs/associate_tigo_messages_contacts_force20.js";
+associateTigoMessagesToContactsForce20();
