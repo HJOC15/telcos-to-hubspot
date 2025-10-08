@@ -13,7 +13,8 @@
     "tigo:b2b": "node src/run-tigo-b2b.js",
     "serve": "node src/server.js",
     "assoc": "node src/run-assoc.js",
-    "tigo:mensajes": "node src/run-tigo-messages.js"
+    "tigo:mensajes": "node src/run-tigo-messages.js",
+    "tigo:contactos": "node src/run-tigo-contacts.js"
   },
   "dependencies": {
     "axios": "^1.7.2",
