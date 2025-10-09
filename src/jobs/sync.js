@@ -1,9 +1,10 @@
 // src/jobs/sync.js
 import { claroListContacts } from "../providers/claro.js";
-import { batchUpsertContacts } from "../sinks/hubspotContacts.js";
+import { batchUpsertCustomObject } from "../sinks/hubspotCustom.js";
 
-const ID_PROP = process.env.HUBSPOT_ID_PROPERTY || "numero_telefono_id_unico";
-const TOKEN = process.env.HUBSPOT_TOKEN;
+const TOKEN   = process.env.HUBSPOT_TOKEN;
+const OBJECT  = (process.env.HUBSPOT_CONTACTS_OBJECT || "contacts").trim(); // usaremos el genérico con "contacts"
+const ID_PROP = (process.env.HUBSPOT_ID_PROPERTY || "numero_telefono_id_unico").trim();
 
 // 1) número base: tomamos msisdn o country_code+phone_number o phone_number, sólo dígitos
 function numeroDesdeClaro(c) {
@@ -38,7 +39,7 @@ function mapClaroToContact(c) {
     phone: phoneE164,
 
     // tu propiedad de upsert (tipo teléfono) CON '+'
-    numero_telefono_id_unico: phoneE164,
+    [ID_PROP]: phoneE164,
 
     // opcional: compat si tienes otra propiedad en el portal
     numero_telefono_id: numeroDigits,
@@ -46,11 +47,14 @@ function mapClaroToContact(c) {
     // nombres
     firstname: safeFirst,
     lastname:  safeLast,
+
+    // NUEVO: propiedad custom que quieres ver en Contactos
+    compania: "Claro",
   };
 }
 
 export async function runSync() {
-  console.log("== Sync start (Contactos) ==");
+  console.log("== Sync start (Contactos Claro) ==");
 
   try {
     const list = await claroListContacts({ limit: 1000 });
@@ -72,8 +76,14 @@ export async function runSync() {
     if (!TOKEN) {
       console.warn("[HS] Falta HUBSPOT_TOKEN. No se enviará nada.");
     } else if (records.length) {
-      const res = await batchUpsertContacts({ token: TOKEN, idProperty: ID_PROP, records });
-      console.log(`[CLARO→HS:contacts] enviados=${res.sent} mode=${res.mode || (res.dryRun ? "dry-run" : "unknown")} idProperty=${ID_PROP}`);
+      // 👇 Usamos el helper genérico (igual que Tigo) para que NO filtre props
+      const res = await batchUpsertCustomObject({
+        token: TOKEN,
+        objectType: OBJECT,   // "contacts"
+        idProperty: ID_PROP,  // "numero_telefono_id_unico"
+        records
+      });
+      console.log(`[CLARO→HS:contacts] enviados=${res.sent} mode=${res.mode || (res.dryRun ? "dry-run" : "batch")} idProperty=${ID_PROP}`);
     } else {
       console.warn("[CLARO] ninguno tiene la clave de upsert. Revisa HUBSPOT_ID_PROPERTY y el mapeo.");
     }
