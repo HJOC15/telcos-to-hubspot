@@ -5,7 +5,7 @@
   "description": "Claro + (opcional Tigo) -> HubSpot custom object, con cron diario 8:00",
   "main": "src/index.js",
   "scripts": {
-    "start": "node src/index.js",
+    "start": "node src/server.js",
     "schedule": "node src/jobs/scheduler.js",
     "fix:phones": "node scripts/normalize_phone_plus.js",
     "dev": "node src/test-original.js",
