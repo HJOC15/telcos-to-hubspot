@@ -6,21 +6,35 @@ import cron from "node-cron";
 // ===== Runners =====
 
 // CLARO
-import { runSync as runClaroContactsSync } from "./jobs/sync.js";
-import { runMessagesSync as runClaroMessagesSync } from "./jobs/sync_messages.js";
+import { runSync as runClaroContactsSync } from "./jobs/sync.js";                 // contactos Claro
+import { runMessagesSync as runClaroMessagesSync } from "./jobs/sync_messages.js"; // mensajes Claro
 
 // TIGO
 import { runTigoMessagesSync } from "./jobs/sync_tigo_messages.js";
 import { runTigoContactsSync } from "./jobs/sync_tigo_contacts.js";
 
-// (opcional) Asociaciones Tigo si quieres dispararlas manualmente
+// Asociaciones (Tigo y genéricas msg→contact)
 import { associateTigoMessagesToContacts } from "./jobs/associate_tigo_messages_contacts.js";
+import { fixOrphanMessagesContacts } from "./jobs/fix_orphan_messages_contacts.js"; // crea contacto faltante y asocia
 
 const app = express();
 app.use(express.json());
 
 const PORT = Number(process.env.PORT || 3000);
 const TIMEZONE = process.env.TIMEZONE || process.env.TZ || "America/Guatemala";
+
+/* Util: envoltorio para no tumbar el proceso si un cron falla */
+async function safeRun(label, fn) {
+  const t0 = Date.now();
+  console.log(`[CRON][${label}] inicio ${new Date().toISOString()}`);
+  try {
+    await fn();
+    const ms = Date.now() - t0;
+    console.log(`[CRON][${label}] fin OK (${ms} ms)`);
+  } catch (e) {
+    console.error(`[CRON][${label}] error:`, e?.response?.data ?? e.message ?? e);
+  }
+}
 
 // ===== Healthcheck =====
 app.get("/health", (_req, res) => res.json({ ok: true, tz: TIMEZONE }));
@@ -29,31 +43,23 @@ app.get("/health", (_req, res) => res.json({ ok: true, tz: TIMEZONE }));
 
 // Claro (manual): contactos + mensajes
 app.get("/cron/claro/run", async (_req, res) => {
-  try {
-    console.log(`[CRON][Claro][manual] inicio ${new Date().toISOString()}`);
+  await safeRun("Claro/manual", async () => {
     await runClaroContactsSync();   // contactos
     await runClaroMessagesSync();   // mensajes
-    console.log("[CRON][Claro][manual] fin OK");
-    res.send("OK (Claro contactos + mensajes)");
-  } catch (e) {
-    console.error("[CRON][Claro][manual] error:", e?.response?.data ?? e.message ?? e);
-    res.status(500).send("Error");
-  }
+    // (opcional) también podrías llamar fixOrphanMessagesContacts() aquí si quieres cubrir huérfanos de Claro inmediatamente
+  });
+  res.send("OK (Claro contactos + mensajes)");
 });
 
-// Tigo (manual): mensajes + contactos +  asociaciones
+// Tigo (manual): mensajes + contactos + asociaciones + huérfanos
 app.get("/cron/tigo/run", async (_req, res) => {
-  try {
-    console.log(`[CRON][Tigo][manual] inicio ${new Date().toISOString()}`);
+  await safeRun("Tigo/manual", async () => {
     await runTigoMessagesSync();            // mensajes
     await runTigoContactsSync();            // contactos
-    await associateTigoMessagesToContacts();
-    console.log("[CRON][Tigo][manual] fin OK");
-    res.send("OK (Tigo mensajes + contactos + asociaciones)");
-  } catch (e) {
-    console.error("[CRON][Tigo][manual] error:", e?.response?.data ?? e.message ?? e);
-    res.status(500).send("Error");
-  }
+    await associateTigoMessagesToContacts();// asocia por número
+    await fixOrphanMessagesContacts();      // crea contactos que falten y asocia
+  });
+  res.send("OK (Tigo mensajes + contactos + asociaciones + huérfanos)");
 });
 
 // ===== Cron jobs programados =====
@@ -61,39 +67,39 @@ app.get("/cron/tigo/run", async (_req, res) => {
 // Claro a las 08:00 GT (contactos + mensajes)
 cron.schedule(
   "0 8 * * *",
-  async () => {
-    console.log(`[CRON][Claro] inicio ${new Date().toISOString()}`);
-    try {
-      await runClaroContactsSync();   // contactos
-      await runClaroMessagesSync();   // mensajes
-      console.log("[CRON][Claro] fin OK");
-    } catch (e) {
-      console.error("[CRON][Claro] error:", e?.response?.data ?? e.message ?? e);
-    }
-  },
+  () => safeRun("Claro", async () => {
+    await runClaroContactsSync();
+    await runClaroMessagesSync();
+    // si quieres también cubrir huérfanos de Claro diario, descomenta:
+    // await fixOrphanMessagesContacts();
+  }),
   { timezone: TIMEZONE }
 );
 console.log(`[CRON] Programado Claro (contactos + mensajes) a las 08:00 ${TIMEZONE}`);
 
-// Tigo a las 09:00 GT (mensajes + contactos)
+// Tigo a las 09:00 GT (mensajes + contactos + asociaciones + huérfanos)
 cron.schedule(
   "0 9 * * *",
-  async () => {
-    console.log(`[CRON][Tigo] inicio ${new Date().toISOString()}`);
-    try {
-      await runTigoMessagesSync();     // mensajes
-      await runTigoContactsSync();     // contactos
-      console.log("[CRON][Tigo] fin OK");
-    } catch (e) {
-      console.error("[CRON][Tigo] error:", e?.response?.data ?? e.message ?? e);
-    }
-  },
+  () => safeRun("Tigo", async () => {
+    await runTigoMessagesSync();       // mensajes
+    await runTigoContactsSync();       // contactos
+    await associateTigoMessagesToContacts(); // asocia por número
+    await fixOrphanMessagesContacts(); // crea contactos que falten y asocia
+  }),
   { timezone: TIMEZONE }
 );
-console.log(`[CRON] Programado Tigo (mensajes + contactos) a las 09:00 ${TIMEZONE}`);
+console.log(`[CRON] Programado Tigo (mensajes + contactos + asociaciones + huérfanos) a las 09:00 ${TIMEZONE}`);
 
 // ===== Start server =====
 app.listen(PORT, () => {
   console.log(`HTTP server listening on :${PORT}`);
   console.log(`Healthcheck: http://localhost:${PORT}/health`);
+});
+
+// ===== Manejo de errores globales (para que no se caiga el proceso) =====
+process.on("unhandledRejection", (reason) => {
+  console.error("[UNHANDLED REJECTION]", reason);
+});
+process.on("uncaughtException", (err) => {
+  console.error("[UNCAUGHT EXCEPTION]", err);
 });
