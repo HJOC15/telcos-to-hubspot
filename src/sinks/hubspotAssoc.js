@@ -116,3 +116,47 @@ export async function batchAssociateDirected({ fromId, toId, associationTypeId, 
   }
   return { created: ok, errors: errs, raw: data };
 }
+
+export async function getAssociationTypeId(fromObject, toObject) {
+  const { associationTypeId, fromId, toId } =
+    await getAssociationTypeIdEitherDirection(fromObject, toObject);
+  return {
+    associationTypeId,
+    fromObjectId: fromId,
+    toObjectId: toId,
+  };
+}
+
+// Puente: crea asociaciones usando v4 con el campo "types" (USER_DEFINED).
+// pairs: Array<[fromRecordId, toRecordId]>
+export async function batchAssociate({
+  fromObject,
+  toObject,
+  associationTypeId,
+  pairs,
+}) {
+  if (!Array.isArray(pairs) || pairs.length === 0) return { created: 0 };
+
+  const fromId = await resolveObjectTypeId(fromObject);
+  const toId   = await resolveObjectTypeId(toObject);
+
+  const url = `https://api.hubapi.com/crm/v4/associations/${encodeURIComponent(fromId)}/${encodeURIComponent(toId)}/batch/create`;
+  const headers = {
+    Authorization: `Bearer ${TOKEN}`,
+    "Content-Type": "application/json",
+  };
+
+  const inputs = pairs.map(([fromRecId, toRecId]) => ({
+    from: { id: String(fromRecId) },
+    to:   { id: String(toRecId) },
+    types: [
+      {
+        associationCategory: "USER_DEFINED",
+        associationTypeId: Number(associationTypeId),
+      },
+    ],
+  }));
+
+  await axios.post(url, { inputs }, { headers });
+  return { created: inputs.length };
+}
