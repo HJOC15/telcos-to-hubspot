@@ -21,38 +21,42 @@ function toE164GT(raw) {
 }
 
 // Mapea un mensaje de Claro → HubSpot
+const REQUIRED = (process.env.HUBSPOT_MSG_REQUIRED_PROP || "id_mensaje").trim();
+
 function mapClaroMessageToHS(m) {
-  // ID del mensaje (toma el primero que exista)
   const msgId =
     m?.id || m?.message_id || m?.uid || m?.messageUid || m?.external_id || m?.profile_uid || m?.messageId || "";
 
-  // número: msisdn, to, o country+phone
   const numeroIn =
     m?.msisdn || m?.to ||
     (m?.country_code && m?.phone_number ? `${m.country_code}${m.phone_number}` : m?.phone_number) || "";
 
-  // normaliza a +502XXXXXXXX
   const numeroE164 = toE164GT(numeroIn);
 
-  // contenido / estado / fecha
   const contenido = m?.text || m?.message || m?.body || m?.content || "";
   const estado    = m?.status || m?.state || m?.delivery_status || m?.deliveryStatus || "";
   const fecha =
     m?.created_at || m?.createdAt || m?.sent_at || m?.sentAt ||
     m?.timestamp || m?.delivered_at || m?.received_at || new Date().toISOString();
 
-  // propiedades para HubSpot
+  const uniqueVal = String(msgId || `${onlyDigits(numeroE164)}-${fecha}`);
+
   const props = {
-    [UNIQUE]: String(msgId || `${onlyDigits(numeroE164)}-${fecha}`),
+    [UNIQUE]: uniqueVal,
+
+    // propiedad requerida tu HS (id_mensaje por defecto)
+    [REQUIRED]: uniqueVal,
+
     numero: numeroE164,
     contenido: contenido || "(sin_contenido)",
     estado,
-    fecha,                 // ISO o datetime según tu propiedad en HS
-    compania: "Claro",     // propiedad nueva
+    fecha,
+    compania: "Claro",
   };
 
   return props;
 }
+
 
 export async function runMessagesSync() {
   console.log("== Sync mensajes Claro → HubSpot (solo upsert, sin asociaciones) ==");

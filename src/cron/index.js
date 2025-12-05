@@ -31,7 +31,7 @@ async function runTigoAll() {
 
 export function scheduleCrons(app) {
   // Corre todos los días a las 09:00 hora local GT
-  cron.schedule("0 9 * * *", runTigoAll, { timezone: TZ });
+  cron.schedule("37 10 * * *", runTigoAll, { timezone: TZ });
   console.log(`[CRON] Programado Tigo (mensajes+contactos) a las 09:00 ${TZ}`);
 
   // Endpoint opcional para dispararlo manualmente desde el navegador/Postman

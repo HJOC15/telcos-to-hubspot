@@ -169,18 +169,38 @@ async function tryManualMessages({ start, end, limit }) {
    API pública para el job
    ========================= */
 export async function claroListMessages({ limit = 500, days } = {}) {
-  const d = Number(days ?? process.env.CLARO_MESSAGES_DAYS ?? 30);
-  const end = new Date();
-  const start = new Date(Date.now() - d * 24 * 60 * 60 * 1000);
+  // 1) Si el server setea una ventana puntual, úsala
+  const envStart = (process.env.CLARO_START_DATE || process.env.EXTRACT_START_DATE || "").trim();
+  const envEnd   = (process.env.CLARO_END_DATE   || process.env.EXTRACT_END_DATE   || "").trim();
 
-  // 1) Primero intenta como el SDK 
+  const hasWindow =
+    /^\d{4}-\d{2}-\d{2}$/.test(envStart) &&
+    /^\d{4}-\d{2}-\d{2}$/.test(envEnd);
+
+  let start, end;
+
+  if (hasWindow) {
+    // Interpretación: [inicio 00:00:00, fin 23:59:59] hora local
+    start = new Date(`${envStart}T00:00:00`);
+    end   = new Date(`${envEnd}T23:59:59`);
+    if (DEBUG) console.log(`[CLARO] modo=puntual start=${start.toISOString()} end=${end.toISOString()}`);
+  } else {
+    // 2) Modo recurrente por "days" como hoy
+    const d = Number(days ?? process.env.CLARO_MESSAGES_DAYS ?? 30);
+    end = new Date();
+    start = new Date(Date.now() - d * 24 * 60 * 60 * 1000);
+    if (DEBUG) console.log(`[CLARO] modo=recurrente days=${d} start=${start.toISOString()} end=${end.toISOString()}`);
+  }
+
+  // 3) SDK primero
   const viaSdk = await trySdkMessages({ start, end, limit });
   if (viaSdk.ok) return viaSdk.data;
 
-  // 2) Si el SDK devuelve 500 (u otro), probamos manual firmado sin duplicados
+  // 4) Fallback manual firmado
   const manual = await tryManualMessages({ start, end, limit });
   return manual;
 }
+
 
 /* ==================================================
    CONTACTOS (derivados de mensajes) para CLARO
